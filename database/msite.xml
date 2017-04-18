@@ -1,0 +1,26 @@
+<multisite>
+	<site region="West Europe" id="0" publicIP="" proBW="" CPU="">
+		<connection target="" thisport="" targetport="" databw="" />
+		<connection target="" thisport="" targetport="" databw="" />
+		<connection target="" thisport="" targetport="" databw="" />
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+	</site>
+	<site region="" id="" publicIP="" port="" proBW="" CPU="">
+		<connection target="" thisport="" targetport="" databw="" />
+		<connection target="" thisport="" targetport="" databw="" />
+		<connection target="" thisport="" targetport="" databw="" />
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>		
+	</site>
+	<site region="" id="" publicIP="" port="" proBW="" CPU="">
+		<connection target="" thisport="" targetport="" databw="" />
+		<connection target="" thisport="" targetport="" databw="" />
+		<connection target="" thisport="" targetport="" databw="" />
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+		<VM id="" privateip="" CPU="" type="" comcap="" price=""/>
+	</site>
+</multisite>

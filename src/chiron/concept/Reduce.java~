@@ -1,0 +1,572 @@
+package chiron.concept;
+
+import chiron.DataBase.EProvenance;
+import Multisite.ComInit;
+import chiron.*;
+import static chiron.DataBase.EProvenance.loadOrderedParameterSpace;
+import java.io.Serializable;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.*;
+
+/**
+ * TO DO: Reduce Operator still needs to be implemented.
+ *
+ * @author jonasdias, vitor
+ */
+class Reduce extends CActivity {
+
+    CRelation input;
+    CRelation output;
+    ArrayList<String> aggregationFields;
+
+    static class ReduceActivation extends CActivation implements Serializable {
+
+        public ReduceActivation(String wfDir, String expDir) {
+            super(wfDir, expDir);
+        }
+
+        @Override
+        @SuppressWarnings("CallToThreadDumpStack")
+        public void instrument(EActivation activation) {
+            activation.stdErr = "";
+            activation.stdOut = "";
+            try {
+
+                activation.templateDir = processTags(activation.templateDir, wfDir, expDir, activation.inputRelation.getFirst());
+                if (activation.templateDir != null && !activation.templateDir.equals("")) {
+                    ChironUtils.copyTemplateFiles(activation.templateDir, activation.workspace);
+                }
+
+                activation.commandLine = processTags(activation.commandLine, wfDir, expDir, activation.inputRelation.getFirst());
+                if (activation.extractor != null) {
+                    activation.extractor = processTags(activation.extractor, wfDir, expDir, activation.inputRelation.getFirst());
+                }
+            } catch (Exception ex) {
+                activation.stdErr += ex.getStackTrace();
+                ex.printStackTrace();
+            }
+        }
+
+        @Override
+        @SuppressWarnings("CallToThreadDumpStack")
+        public void execute(EActivation activation) {
+            String workspace = activation.workspace;
+            String command = activation.commandLine + " > " + workspace + ChironUtils.resultFile + " 2> " + workspace + ChironUtils.errorFile;
+            try {
+                activation.exitStatus = ChironUtils.runCommand(command, workspace);
+                activation.stdErr += ChironUtils.ReadFile(workspace + ChironUtils.errorFile);
+                activation.stdOut += ChironUtils.ReadFile(workspace + ChironUtils.resultFile);
+            } catch (Exception ex) {
+                activation.stdErr += ex.getStackTrace();
+                ex.printStackTrace();
+            }
+        }
+
+        @Override
+        @SuppressWarnings("CallToThreadDumpStack")
+        public void extract(EActivation activation) {
+            try {
+                Scanner s = this.runExtractor(activation);
+
+                String line = s.nextLine();
+                String fields[] = line.split(ChironUtils.relationSeparator);
+                line = s.nextLine();
+                String values[] = line.split(ChironUtils.relationSeparator);
+                if (fields.length != values.length) {
+                    throw new Exception("The number of extracted values do not "
+                            + "correspond to the number of extracted fields. "
+                            + "Check the ERelation.txt extracted file.");
+                }
+                //extractedTuple stores the values extracted to ERelation.txt
+                HashMap<String, String> extractedTuple = new HashMap<String, String>();
+                for (int i = 0; i < fields.length; i++) {
+                    extractedTuple.put(fields[i], values[i]);
+                }
+
+                //outputTuple stores the tuple of the output Relation
+                LinkedHashMap<String, String> outputTuple = new LinkedHashMap<String, String>();
+                for (String field : activation.outputRelation.fields) {
+                    if (extractedTuple.containsKey(field)) {
+                        outputTuple.put(field, extractedTuple.get(field));
+                    } else if (activation.inputRelation.getFirst().containsKey(field.toLowerCase())) {
+                        outputTuple.put(field, activation.inputRelation.getFirst().get(field.toLowerCase()));
+                    } else {
+                        throw new Exception("The value for the " + field + " is missing.");
+                    }
+                }
+                for (EFile file : activation.files) {
+                    if (outputTuple.containsKey(file.fieldName.toUpperCase())) {
+                        if (file.getFileName() == null) {
+                            file.setFileName(outputTuple.get(file.fieldName.toUpperCase()));
+                        }
+                        file.setFileDir(activation.workspace);
+                        file.fsite = activation.site;
+                        outputTuple.put(file.fieldName.toUpperCase(), file.getPath());
+                    }//else{
+                    //  outputTuple.put(file.fieldName, file.getPath());
+                    //}
+                }
+                activation.outputRelation = new ERelation(activation.outputRelation.name, activation.inputRelation.getFirstKey(), outputTuple);
+            } catch (Exception ex) {
+                activation.stdErr += "Extractor Error:" + ex.getStackTrace();
+                ex.printStackTrace();
+            }
+        }
+
+        @Override
+        public void pipelineData(EActivation activation) {
+            HashMap<String, String> pipedOutput = activation.pipelinedFrom.outputRelation.getFirst();
+            Integer k = activation.pipelinedFrom.outputRelation.getFirstKey();
+            Integer newKey = k;
+            HashMap<String, String> inputTuple = new HashMap<>();
+            for (String field : activation.inputRelation.fields) {
+                inputTuple.put(field, pipedOutput.get(field));
+                EFile f = activation.getFile(field);
+                if (f != null) {
+                    f.setFileName(pipedOutput.get(field));
+                }
+            }
+            activation.inputRelation = new ERelation(activation.inputRelation.name, newKey, inputTuple);
+        }
+    }
+
+    public Reduce() {
+        this(Operator.REDUCE);
+    }
+
+    private Reduce(Operator type) {
+        super(type);
+    }
+
+    @Override
+    public void addInput(CRelation relations) {
+        input = relations;
+    }
+
+    @Override
+    public void addOutput(CRelation relations) {
+        output = relations;
+    }
+
+    @Override
+    public List<CRelation> getInputRelations() {
+        List<CRelation> ret = new ArrayList<>();
+        ret.add(input);
+        return ret;
+    }
+
+    @Override
+    public List<CRelation> getOutputRelations() {
+        List<CRelation> ret = new ArrayList<>();
+        ret.add(output);
+        return ret;
+    }
+
+    @Override
+    public void generateActivations(EActivity act, String wfDir, String expDir) throws Exception {
+        if (input == null) {
+            //something is wrong
+            throw new NullPointerException("The input relation for activity" + act.tag + " is not available in the list of relations.");
+        } else {
+            if (Chiron.machine == 0) {
+                ComInit.synchronize("generate begin", "begin " + act.tag);
+            }
+            if (ChironUtils.isMasterSite()) {
+                checkDependencies(input);
+            }
+            if (Chiron.machine == 0) {
+                ComInit.synchronize("generate begin", "end " + act.tag);
+            }
+            String folderActivity = expDir + this.tag + ChironUtils.SEPARATOR;
+            ChironUtils.createDirectory(folderActivity);
+//            if (ChironUtils.isMasterSite()) {
+            aggregationFields = EProvenance.getTextOperand(this.id);
+            int numberFolder = EProvenance.loadBeginNum(input, aggregationFields, Chiron.site);
+//                ResultSet rs = EProvenance.loadOrderedParameterSpace(input, aggregationFields);
+//                int numActivations = 0;
+            if(numberFolder!=-1){
+                ArrayList<String> keys = null;
+                List<EFile> activationFiles = null;
+                ResultSet rss;
+                ResultSet rs = EProvenance.loadOrderedParameterSpace(input, aggregationFields, Chiron.site);
+                while (rs.next()) {
+                    
+                    String activationFolder = ChironUtils.getActivationFolder(numberFolder, folderActivity);
+                    EActivation newActivation = this.createActivation(act, activationFolder);
+                    newActivation.files = new ArrayList<>();
+                    
+                    keys = new ArrayList<>();
+                    for(String af : aggregationFields){
+                        keys.add(String.valueOf(rs.getObject(af)));
+                    }
+
+                    rss = loadOrderedParameterSpace(input.name, aggregationFields, keys);
+
+                    while(rss.next()){
+                        int ik = rs.getInt("ik");
+                        List<EFile> fileFields = EProvenance.getFileFields(this.getInputRelations().get(0));
+
+                        ResultSet relation = EProvenance.loadOrderedParameterSpace(inputRelation.name, ik, aggregationFields);
+                        List<String> fields = EProvenance.retrieveFields(inputRelation.name);
+                        while (relation.next()) {
+                            Integer k = relation.getInt("ik");
+
+                            String[] fValues = new String[fields.size()];
+                            for (int i = 0; i < fields.size(); i++) {
+                                String f = fields.get(i);
+                                Object o = relation.getObject(f);
+                                if (o.getClass().equals(Double.class)) {
+                                    int decimalPlaces = EProvenance.getDecimalPlaces(f, act.operation.getInputRelations().get(0));
+                                    String d = ChironUtils.formatFloat((Double) o, decimalPlaces);
+                                    fValues[i] = d;
+                                } else {
+                                    fValues[i] = String.valueOf(relation.getObject(f));
+                                }
+                            }
+                            inputRelation.values.put(k, fValues);
+                        }
+
+                        boolean this_site = false, begin = false;
+
+                        //CActivity dependency = input.dependency;
+                        for (EFile f : fileFields) {
+
+                            EProvenance.get_file_para(f);
+                            if (!this_site && !begin) {
+                                this_site = f.fsite == Chiron.site;
+                                begin = true;
+                            } 
+                            EFile file = new EFile(f.instrumented, f.fieldName.toUpperCase(), f.fileOper);
+                            file.setFileName(rs.getString(file.fieldName));
+
+                            newActivation.files.add(file);
+                        }
+                    }
+                    
+                    newActivation.files = activationFiles;
+
+                    ERelation outputRel = new ERelation(output.name, output.fields);
+                    newActivation.outputRelation = outputRel;
+                    List<EFile> outputfileFields = EProvenance.getFileFields(this.getOutputRelations().get(0));
+                    boolean this_site = false, begin = false;
+                    for (EFile f : outputfileFields) {
+                        if (!this_site && !begin) {
+                            this_site = f.fsite == Chiron.site;
+                            begin = true;
+                        } else {
+                            if (this_site) {
+                                if (f.fsite != Chiron.site) {
+//                                    f.transfer();
+                                }
+                            }
+                        }
+                        if (!newActivation.hasFile(f.fieldName)) {
+                            f.setFileDir(newActivation.workspace);
+                            newActivation.files.add(f);
+                        }
+                    }
+                    newActivation.inputRelation = inputRelation;
+//                        if (this_site) {
+                    EProvenance.storeActivation(newActivation);
+//                        }
+//                        numActivations++;
+                    ChironUtils.createDirectory(newActivation.workspace);
+                    ChironUtils.deleteFile(ChironUtils.relationFile, newActivation.workspace);
+                    String csv = newActivation.inputRelation.getCSVHeader() + newActivation.inputRelation.getCSV();
+                    ChironUtils.WriteFile(newActivation.workspace + newActivation.inputRelation.name + ".hfrag", csv);
+
+                    //refresh loop
+                    inputRelation = new ERelation(input.name, input.fields);
+                    activationFiles = new ArrayList<>();
+
+                    int ik = rs.getInt("ik");
+                    ResultSet relation = EProvenance.loadOrderedParameterSpace(inputRelation.name, ik, aggregationFields);
+                    List<String> fields = EProvenance.retrieveFields(inputRelation.name);
+                    while (relation.next()) {
+                        Integer k = relation.getInt("ik");
+                        String[] fValues = new String[fields.size()];
+                        for (int i = 0; i < fields.size(); i++) {
+                            String f = fields.get(i);
+                            Object o = relation.getObject(f);
+                            if (o != null) {
+                                if (o.getClass().equals(Double.class)) {
+                                    int decimalPlaces = EProvenance.getDecimalPlaces(f, act.operation.getInputRelations().get(0));
+                                    String d = ChironUtils.formatFloat((Double) o, decimalPlaces);
+                                    fValues[i] = d;
+                                } else {
+                                    fValues[i] = String.valueOf(relation.getObject(f));
+                                }
+                            } else {
+                                fValues[i] = "";
+                            }
+                        }
+                        inputRelation.values.put(k, fValues);
+                    }
+
+                    lastValues = new ArrayList<>();
+                    for (String v : values) {
+                        lastValues.add(v);
+                    }
+                    
+                    
+                    numberFolder++;
+                }
+            }
+            ArrayList<String> lastValues = new ArrayList<>();
+            ERelation inputRelation = new ERelation(input.name, input.fields);
+            List<EFile> activationFiles = new ArrayList<>();
+            ArrayList<String> keys = null;
+            boolean first = true;
+            ResultSet rss;
+            while (rs.next()) {
+
+                keys = new ArrayList<>();
+                for(String af : aggregationFields){
+                    keys.add(String.valueOf(rs.getObject(af)));
+                }
+                
+                rss = loadOrderedParameterSpace(input.name, aggregationFields, keys);
+                
+                while(rss.next()){
+                    
+                }
+                
+                
+                ArrayList<String> values = new ArrayList<>();
+                for (String af : aggregationFields) {
+                    values.add(String.valueOf(rs.getObject(af)));
+                }
+
+                if (first) {
+                    lastValues = new ArrayList<>();
+                    for (String v : values) {
+                        lastValues.add(v);
+                    }
+
+                    first = false;
+                }
+
+                if (checkAggregationValues(values, lastValues)) {
+                    int ik = rs.getInt("ik");
+                    List<EFile> fileFields = EProvenance.getFileFields(this.getInputRelations().get(0));
+
+                    ResultSet relation = EProvenance.loadOrderedParameterSpace(inputRelation.name, ik, aggregationFields);
+                    List<String> fields = EProvenance.retrieveFields(inputRelation.name);
+                    while (relation.next()) {
+                        Integer k = relation.getInt("ik");
+
+                        String[] fValues = new String[fields.size()];
+                        for (int i = 0; i < fields.size(); i++) {
+                            String f = fields.get(i);
+                            Object o = relation.getObject(f);
+                            if (o.getClass().equals(Double.class)) {
+                                int decimalPlaces = EProvenance.getDecimalPlaces(f, act.operation.getInputRelations().get(0));
+                                String d = ChironUtils.formatFloat((Double) o, decimalPlaces);
+                                fValues[i] = d;
+                            } else {
+                                fValues[i] = String.valueOf(relation.getObject(f));
+                            }
+                        }
+                        inputRelation.values.put(k, fValues);
+                    }
+
+                    boolean this_site = false, begin = false;
+
+                    //CActivity dependency = input.dependency;
+                    for (EFile f : fileFields) {
+
+                        EProvenance.get_file_para(f);
+                        if (!this_site && !begin) {
+                            this_site = f.fsite == Chiron.site;
+                            begin = true;
+                        } else {
+                            if (this_site) {
+                                if (f.fsite != -1 && f.fsite != Chiron.site) {
+//                                    f.transfer();
+                                }
+                            }
+                        }
+                        EFile file = new EFile(f.instrumented, f.fieldName.toUpperCase(), f.fileOper);
+                        file.setFileName(rs.getString(file.fieldName));
+//                        if (dependency != null){
+//                            String depFolder = expDir + dependency.tag + ChironUtils.SEPARATOR;
+//                            String depActivationFolder = ChironUtils.getActivationFolder(numActivations, depFolder);
+//                            f.setFileDir(depActivationFolder);
+//                        }else if (!new File(file.getPath()).exists()) {
+//                            file.setFileDir(expDir + "input/");
+//                        }
+
+                        activationFiles.add(file);
+                    }
+                } else {
+                    //store activation
+                    String activationFolder = ChironUtils.getActivationFolder(rs.getInt("ik"), folderActivity);
+                    EActivation newActivation = this.createActivation(act, activationFolder);
+                    newActivation.files = activationFiles;
+
+                    ERelation outputRel = new ERelation(output.name, output.fields);
+                    newActivation.outputRelation = outputRel;
+                    List<EFile> outputfileFields = EProvenance.getFileFields(this.getOutputRelations().get(0));
+                    boolean this_site = false, begin = false;
+                    for (EFile f : outputfileFields) {
+                        if (!this_site && !begin) {
+                            this_site = f.fsite == Chiron.site;
+                            begin = true;
+                        } else {
+                            if (this_site) {
+                                if (f.fsite != Chiron.site) {
+//                                    f.transfer();
+                                }
+                            }
+                        }
+                        if (!newActivation.hasFile(f.fieldName)) {
+                            f.setFileDir(newActivation.workspace);
+                            newActivation.files.add(f);
+                        }
+                    }
+                    newActivation.inputRelation = inputRelation;
+//                        if (this_site) {
+                    EProvenance.storeActivation(newActivation);
+//                        }
+//                        numActivations++;
+                    ChironUtils.createDirectory(newActivation.workspace);
+                    ChironUtils.deleteFile(ChironUtils.relationFile, newActivation.workspace);
+                    String csv = newActivation.inputRelation.getCSVHeader() + newActivation.inputRelation.getCSV();
+                    ChironUtils.WriteFile(newActivation.workspace + newActivation.inputRelation.name + ".hfrag", csv);
+
+                    //refresh loop
+                    inputRelation = new ERelation(input.name, input.fields);
+                    activationFiles = new ArrayList<>();
+
+                    int ik = rs.getInt("ik");
+                    ResultSet relation = EProvenance.loadOrderedParameterSpace(inputRelation.name, ik, aggregationFields);
+                    List<String> fields = EProvenance.retrieveFields(inputRelation.name);
+                    while (relation.next()) {
+                        Integer k = relation.getInt("ik");
+                        String[] fValues = new String[fields.size()];
+                        for (int i = 0; i < fields.size(); i++) {
+                            String f = fields.get(i);
+                            Object o = relation.getObject(f);
+                            if (o != null) {
+                                if (o.getClass().equals(Double.class)) {
+                                    int decimalPlaces = EProvenance.getDecimalPlaces(f, act.operation.getInputRelations().get(0));
+                                    String d = ChironUtils.formatFloat((Double) o, decimalPlaces);
+                                    fValues[i] = d;
+                                } else {
+                                    fValues[i] = String.valueOf(relation.getObject(f));
+                                }
+                            } else {
+                                fValues[i] = "";
+                            }
+                        }
+                        inputRelation.values.put(k, fValues);
+                    }
+
+                    lastValues = new ArrayList<>();
+                    for (String v : values) {
+                        lastValues.add(v);
+                    }
+                }
+            }
+
+            //Insert the last value
+            if (!lastValues.isEmpty()) {
+                String activationFolder = ChironUtils.getActivationFolder(rs.getInt("ik"), folderActivity);
+                EActivation newActivation = this.createActivation(act, activationFolder);
+                newActivation.inputRelation = inputRelation;
+                newActivation.files = activationFiles;
+
+                ERelation outputRel = new ERelation(output.name, output.fields);
+                newActivation.outputRelation = outputRel;
+                List<EFile> outputfileFields = EProvenance.getFileFields(this.getOutputRelations().get(0));
+                boolean this_site = false, begin = false;
+                for (EFile f : outputfileFields) {
+                    if (!this_site && !begin) {
+                        this_site = f.fsite == Chiron.site;
+                        begin = true;
+                    } else {
+                        if (this_site) {
+                            if (f.fsite != Chiron.site) {
+//                                f.transfer();
+                            }
+                        }
+                    }
+                    if (!newActivation.hasFile(f.fieldName)) {
+                        f.setFileDir(newActivation.workspace);
+                        newActivation.files.add(f);
+                    }
+                }
+//                    if (this_site) {
+                EProvenance.storeActivation(newActivation);
+//                    }
+//                    numActivations++;
+                ChironUtils.createDirectory(newActivation.workspace);
+                ChironUtils.deleteFile(ChironUtils.relationFile, newActivation.workspace);
+                String csv = newActivation.inputRelation.getCSVHeader() + newActivation.inputRelation.getCSV();
+                ChironUtils.WriteFile(newActivation.workspace + newActivation.inputRelation.name + ".hfrag", csv);
+            }
+            act.numActivations = EProvenance.loadParameterSpaceNum(input.name, aggregationFields);
+//            }
+            act.status = EActivity.StatusType.RUNNING;
+            if (Chiron.machine == 0) {
+                ComInit.synchronize("generate end begin", "begin" + act.tag);
+            }
+            if (ChironUtils.isMasterSite()) {
+                EProvenance.storeActivity(act);
+            }
+            if (Chiron.machine == 0) {
+                ComInit.synchronize("generate end middle", "middle" + act.tag);
+//                if (ChironUtils.isMasterSite()) {
+//                    ComInit.broadCast(act.numActivations + "");
+//                } else {
+//                    act.numActivations = Integer.parseInt(ComInit.getBroadCastString());
+//                }
+            }
+            if (Chiron.site != 0) {
+                act.id = EProvenance.getActivityId(act.tag);
+            }
+            if (Chiron.machine == 0) {
+                ComInit.synchronize("generate begin", "end " + act.tag);
+            }
+        }
+    }
+
+    @Override
+    public EActivation createPipelineActivation(String expDir, String wfDir, EActivity act, EActivity dep, EActivation activation) {
+        String folderActivation = activation.workspace.replace(act.tag, dep.tag);
+        ChironUtils.createDirectory(expDir + dep.operation.tag);
+
+        EActivation depActivation = this.createActivation(dep, folderActivation);
+
+        depActivation.inputRelation = new ERelation(this.input.name, this.input.fields);
+        depActivation.outputRelation = new ERelation(this.output.name, this.output.fields);
+        try {
+            List<EFile> fileFields = EProvenance.getFileFields(this.getInputRelations().get(0));
+            for (EFile f : fileFields) {
+                depActivation.files.add(f);
+            }
+            fileFields = EProvenance.getFileFields(this.getOutputRelations().get(0));
+            for (EFile f : fileFields) {
+                if (!depActivation.hasFile(f.fieldName)) {
+                    depActivation.files.add(f);
+                }
+            }
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+        }
+        depActivation.activator = CActivation.newInstance(act);
+        return depActivation;
+    }
+
+    private boolean checkAggregationValues(ArrayList<String> values, ArrayList<String> lastValues) {
+        for (int i = 0; i < values.size(); i++) {
+            if (!values.get(i).equals(lastValues.get(i))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+}
